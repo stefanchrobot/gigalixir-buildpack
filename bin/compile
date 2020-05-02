@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+
+# bin/compile BUILD_DIR CACHE_DIR ENV_DIR
+
+set -o errexit    # Always exit on error.
+set -o pipefail   # Don't ignore exit codes when piping output.
+unset GIT_DIR     # Avoid GIT_DIR leak from previous build steps.
+shopt -s dotglob  # Include dotfiles when moving sources.
+
+function output_section() {
+  echo "-----> $1"
+}
+
+function output_line() {
+  echo "       $1"
+}
+
+output_section "Compiling..."
+
+#
+# Ensure dirs are present in case some previous run messes things up.
+#
+mkdir -p $1 $2 $3
+
+#
+# Grab the absoulte paths.
+#
+build_dir=$(cd $1 && pwd)
+cache_dir=$(cd $2 && pwd)
+env_dir=$(cd $3 && pwd)
+
+output_line "build_dir is ${build_dir}"
+output_line "cache_dir is ${cache_dir}"
+output_line "env_dir is ${env_dir}"
+
+#
+# Clean the cache, always start from scratch (for now).
+#
+rm -rf ${cache_dir}/*
+
+#
+# Run the build from the cache dir to keep the build dir clean,
+# since the app is run from build dir. Begin by moving the sources to it's own dir.
+#
+source_dir="${cache_dir}/source"
+mkdir -p ${source_dir}
+mv ${build_dir}/* -t ${source_dir}
+
+buildpack_dir="${source_dir}/buildpack"
+
+#
+# Read the config and check required variables.
+#
+config_path="${buildpack_dir}/config"
+
+if [ ! -e ${config_path} ]; then
+  echo 'Configuration file not found at buildpack/config.'
+  exit 1
+fi
+
+source ${config_path}
+
+required_vars=(erlang_version elixir_version)
+
+for required_var in ${required_vars[*]}; do
+  if [ -z "${!required_var}" ]; then
+    echo "Required variable ${required_var} is blank or not set."
+    exit 1
+  fi
+done
+
+#
+# Print versions.
+#
+output_section 'Using versions:'
+output_line "Stack ${STACK}"
+output_line "Erlang ${erlang_version}"
+output_line "Elixir ${elixir_version}"
+
+cd ${cache_dir}
+
+#
+# Set locale for the Erlang VM.
+#
+export LC_CTYPE=en_US.utf8
+
+#
+# Download and install Erlang.
+#
+output_section 'Downloading and installing Erlang...'
+
+erlang_package="OTP-${erlang_version}.tar.gz"
+erlang_package_url="https://s3.amazonaws.com/heroku-buildpack-elixir/erlang/cedar-14/${erlang_package}"
+erlang_package_path="${cache_dir}/${erlang_package}"
+output_line "Downloading Erlang ${erlang_version} from ${erlang_package_url}..."
+curl -s ${erlang_package_url} -o ${erlang_package_path} || exit 1
+
+output_line "Installing Erlang ${erlang_version}..."
+
+erlang_dir="${cache_dir}/erlang"
+mkdir -p ${erlang_dir}
+tar zxf ${erlang_package_path} -C ${erlang_dir} --strip-components=1
+${erlang_dir}/Install -minimal ${erlang_dir}
+PATH=${erlang_dir}/bin:${PATH}
+
+output_line 'Checking Erlang...'
+erl -version
+
+#
+# Download and install Elixir.
+#
+output_section 'Downloading and installing Elixir...'
+
+otp_version=$(echo "${erlang_version}" | awk 'match($0, /^[0-9][0-9]/) { print substr( $0, RSTART, RLENGTH )}')
+elixir_package="elixir-${elixir_version}.zip"
+elixir_package_url="https://repo.hex.pm/builds/elixir/v${elixir_version}-otp-${otp_version}.zip"
+elixir_package_path="${cache_dir}/${elixir_package}"
+output_line "Downloading Elixir ${elixir_version} for OTP ${otp_version} from ${elixir_package_url}..."
+curl -s ${elixir_package_url} -o ${elixir_package_path}
+if [ $? -ne 0 ]; then
+  output_line "Package not found, falling back to fetching Elixir ${elixir_version} for generic OTP version..."
+  elixir_package_url="https://repo.hex.pm/builds/elixir/v${elixir_version}.zip"
+  curl -s ${elixir_package_url} -o ${elixir_package_path} || exit 1
+fi
+
+output_line "Installing Elixir ${elixir_version}..."
+
+elixir_dir="${cache_dir}/elixir"
+mkdir -p ${elixir_dir}
+unzip -q ${elixir_package_path} -d ${elixir_dir}
+chmod +x ${elixir_dir}/bin/*
+PATH=${elixir_dir}/bin:${PATH}
+
+output_line 'Checking Elixir...'
+elixir --version
+
+#
+# Setup Mix, Hex and Rebar.
+#
+output_line 'Installing Hex and Rebar...'
+export MIX_HOME="${cache_dir}/.mix"
+mix local.hex --force
+mix local.rebar --force
+
+#
+# Build the application.
+#
+output_section 'Building the application...'
+
+cd ${source_dir}
+
+build_script_path="${buildpack_dir}/build"
+
+if [ ! -e ${build_script_path} ]; then
+  echo 'Build script not found at buildpack/build.'
+  exit 1
+fi
+
+source ${build_script_path}
+
+procfile_path="${buildpack_dir}/Procfile"
+
+if [ ! -e ${procfile_path} ]; then
+  echo 'Procfile not found at buildpack/Procfile.'
+  exit 1
+fi
+
+cp ${procfile_path} ${build_dir}
+
+output_section 'Compilation complete.'

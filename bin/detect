@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+
+# bin/detect BUILD_DIR
+
+echo "Custom Elixir buildpack for Gigalixir"
+exit 0

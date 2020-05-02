@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+
+# bin/release BUILD_DIR
+
+# Not used, we assume that Procfile is always provided.
+
+cat <<EOF
+---
+addons:
+  []
+default_process_types:
+  web: true
+EOF
